@@ -16,4 +16,4 @@ QR Code Generator (Ziad)
 
 QR Code Scanner (Kareem)
  
-KAMYA MENON loves kkkiiiiiiii
+KAMYA MENON loves llllllllllllllllll
