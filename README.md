@@ -62,4 +62,4 @@ QR Code Generator (Ziad)
 
 QR Code Scanner (Kareem)
  
-KAMYA MENON
+KAMYA MENON loves vyshag
