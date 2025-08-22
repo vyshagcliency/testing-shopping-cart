@@ -17,3 +17,7 @@ QR Code Generator (Ziad)
 QR Code Scanner (Kareem)
 KALEED AL ASAD
 ceo @mckinsey - vyshag-pent
+jscyyyyyyyyyyyyyyyy]m[n
+ oib 
+  op
+  nno]
