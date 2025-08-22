@@ -16,4 +16,3 @@ QR Code Generator (Ziad)
 
 QR Code Scanner (Kareem)
  
-llllllllllllllllllll\ll
