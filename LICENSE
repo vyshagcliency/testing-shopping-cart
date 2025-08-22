@@ -1,0 +1,643 @@
+import React, { useState, useEffect } from 'react';
+import { GitBranch, Plus, Check, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { useToast } from '@/hooks/use-toast';
+import { VibeKitClient } from '../../services/vibekit-client';
+import { useSessionStore } from '../../stores/session-store';
+import { VibeKitRegistrationService } from '../../services/vibekit-registration';
+import { useUserProfile } from '@/hooks/use-user-profile';
+
+interface BranchSelectorProps {
+  sessionId: string;
+  vibekitSessionId?: string;
+  repository?: string;
+  currentBranch?: string;
+  vibekitClient?: VibeKitClient;
+  tenantId: string;
+}
+
+export const BranchSelector: React.FC<BranchSelectorProps> = ({
+  sessionId,
+  vibekitSessionId,
+  repository,
+  currentBranch = 'main',
+  vibekitClient: propClient,
+  tenantId,
+}) => {
+  const { toast } = useToast();
+  const { profile } = useUserProfile();
+  const updateSession = useSessionStore((state) => state.updateSession);
+  
+  const [branches, setBranches] = useState<string[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState(currentBranch);
+  const [loading, setLoading] = useState(false);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [newBranchName, setNewBranchName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [vibekitClient, setVibekitClient] = useState<VibeKitClient | null>(propClient || null);
+
+  // Initialize VibeKit client if not provided
+  useEffect(() => {
+    const initClient = async () => {
+      if (!propClient && profile && vibekitSessionId) {
+        try {
+          const apiKey = await VibeKitRegistrationService.ensureUserHasApiKey(
+            profile.id,
+            profile.tenant_id,
+            profile.email || ''
+          );
+          const client = new VibeKitClient(apiKey);
+          setVibekitClient(client);
+        } catch (error) {
+          console.error('Failed to initialize VibeKit client:', error);
+        }
+      }
+    };
+    
+    initClient();
+  }, [propClient, profile, vibekitSessionId]);
+
+  // Fetch branches from git
+  const fetchBranches = async () => {
+    if (!vibekitClient || !vibekitSessionId || !repository) return;
+
+    setLoading(true);
+    try {
+      // Get all branches
+      const result = await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        'cd /var/vibe0 && git branch -a | sed "s/^[* ]*//" | sed "s/^remotes\\/origin\\///" | sort -u'
+      );
+
+      if (result.stdout) {
+        const branchList = result.stdout
+          .split('\n')
+          .filter((b: string) => b && !b.includes('HEAD'))
+          .map((b: string) => b.trim());
+        
+        // Ensure main/master is in the list
+        if (!branchList.includes('main')) {
+          branchList.unshift('main');
+        }
+        
+        setBranches(branchList);
+      }
+    } catch (error) {
+      console.error('Failed to fetch branches:', error);
+      // Fallback to main branch
+      setBranches(['main']);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch branches on mount
+  useEffect(() => {
+    if (vibekitClient && vibekitSessionId && repository) {
+      fetchBranches();
+    }
+  }, [vibekitClient, vibekitSessionId, repository]);
+
+  // Switch branch
+  const handleBranchSwitch = async (branch: string) => {
+    if (!vibekitClient || !vibekitSessionId || branch === selectedBranch) return;
+
+    setLoading(true);
+    try {
+      // Check for uncommitted changes
+      const statusResult = await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        'cd /var/vibe0 && git status --porcelain'
+      );
+
+      if (statusResult.stdout && statusResult.stdout.trim()) {
+        // There are uncommitted changes
+        const shouldStash = confirm(
+          'You have uncommitted changes. Do you want to stash them before switching branches?'
+        );
+
+        if (shouldStash) {
+          await vibekitClient.executeCommand(
+            tenantId,
+            vibekitSessionId,
+            'cd /var/vibe0 && git stash push -m "Auto-stash before branch switch"'
+          );
+        } else {
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Switch branch
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git checkout ${branch}`
+      );
+
+      // Pull latest changes
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git pull origin ${branch} || echo "No remote changes"`
+      );
+
+      setSelectedBranch(branch);
+      updateSession(sessionId, { currentBranch: branch });
+
+      toast({
+        title: 'Branch switched',
+        description: `Now on branch: ${branch}`,
+      });
+    } catch (error) {
+      console.error('Failed to switch branch:', error);
+      toast({
+        title: 'Failed to switch branch',
+        description: 'Could not switch to the selected branch',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Create new branch
+  const handleCreateBranch = async () => {
+    if (!vibekitClient || !vibekitSessionId || !newBranchName) return;
+
+    setCreating(true);
+    try {
+      // Create and checkout new branch
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git checkout -b ${newBranchName}`
+      );
+
+      // Push to remote
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git push -u origin ${newBranchName}`
+      );
+
+      // Update state
+      setBranches([...branches, newBranchName]);
+      setSelectedBranch(newBranchName);
+      updateSession(sessionId, { currentBranch: newBranchName });
+
+      toast({
+        title: 'Branch created',
+        description: `Created and switched to: ${newBranchName}`,
+      });
+
+      setShowCreateDialog(false);
+      setNewBranchName('');
+    } catch (error) {
+      console.error('Failed to create branch:', error);
+      toast({
+        title: 'Failed to create branch',
+        description: 'Could not create the new branch',
+        variant: 'destructive',
+      });
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (!repository) {
+    return null;
+  }
+
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <GitBranch className="h-4 w-4 text-muted-foreground" />
+        <Select
+          value={selectedBranch}
+          onValueChange={handleBranchSwitch}
+          disabled={loading || !vibekitClient}
+        >
+          <SelectTrigger className="h-8 w-[140px]">
+            {loading ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <SelectValue />
+            )}
+          </SelectTrigger>
+          <SelectContent>
+            {branches.map((branch) => (
+              <SelectItem key={branch} value={branch}>
+                <div className="flex items-center gap-2">
+                  {branch === selectedBranch && (
+                    <Check className="h-3 w-3 text-green-600" />
+                  )}
+                  <span>{branch}</span>
+                </div>
+              </SelectItem>
+            ))}
+            <div className="border-t mt-1 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full justify-start gap-2 h-8"
+                onClick={() => setShowCreateDialog(true)}
+              >
+                <Plus className="h-3 w-3" />
+                Create new branch
+              </Button>
+            </div>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Create Branch Dialog */}
+      <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create New Branch</DialogTitle>
+            <DialogDescription>
+              Create a new branch from the current branch ({selectedBranch})
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="branch-name">Branch name</Label>
+              <Input
+                id="branch-name"
+                value={newBranchName}
+                onChange={(e) => setNewBranchName(e.target.value)}
+                placeholder="feature/new-feature"
+              />
+              <p className="text-xs text-muted-foreground">
+                Use descriptive names like feature/auth or fix/bug-123
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowCreateDialog(false)}
+              disabled={creating}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateBranch}
+              disabled={!newBranchName || creating}
+            >
+              {creating ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                'Create Branch'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};import React, { useState, useEffect } from 'react';
+import { GitBranch, Plus, Check, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { useToast } from '@/hooks/use-toast';
+import { VibeKitClient } from '../../services/vibekit-client';
+import { useSessionStore } from '../../stores/session-store';
+import { VibeKitRegistrationService } from '../../services/vibekit-registration';
+import { useUserProfile } from '@/hooks/use-user-profile';
+
+interface BranchSelectorProps {
+  sessionId: string;
+  vibekitSessionId?: string;
+  repository?: string;
+  currentBranch?: string;
+  vibekitClient?: VibeKitClient;
+  tenantId: string;
+}
+
+export const BranchSelector: React.FC<BranchSelectorProps> = ({
+  sessionId,
+  vibekitSessionId,
+  repository,
+  currentBranch = 'main',
+  vibekitClient: propClient,
+  tenantId,
+}) => {
+  const { toast } = useToast();
+  const { profile } = useUserProfile();
+  const updateSession = useSessionStore((state) => state.updateSession);
+  
+  const [branches, setBranches] = useState<string[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState(currentBranch);
+  const [loading, setLoading] = useState(false);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [newBranchName, setNewBranchName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [vibekitClient, setVibekitClient] = useState<VibeKitClient | null>(propClient || null);
+
+  // Initialize VibeKit client if not provided
+  useEffect(() => {
+    const initClient = async () => {
+      if (!propClient && profile && vibekitSessionId) {
+        try {
+          const apiKey = await VibeKitRegistrationService.ensureUserHasApiKey(
+            profile.id,
+            profile.tenant_id,
+            profile.email || ''
+          );
+          const client = new VibeKitClient(apiKey);
+          setVibekitClient(client);
+        } catch (error) {
+          console.error('Failed to initialize VibeKit client:', error);
+        }
+      }
+    };
+    
+    initClient();
+  }, [propClient, profile, vibekitSessionId]);
+
+  // Fetch branches from git
+  const fetchBranches = async () => {
+    if (!vibekitClient || !vibekitSessionId || !repository) return;
+
+    setLoading(true);
+    try {
+      // Get all branches
+      const result = await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        'cd /var/vibe0 && git branch -a | sed "s/^[* ]*//" | sed "s/^remotes\\/origin\\///" | sort -u'
+      );
+
+      if (result.stdout) {
+        const branchList = result.stdout
+          .split('\n')
+          .filter((b: string) => b && !b.includes('HEAD'))
+          .map((b: string) => b.trim());
+        
+        // Ensure main/master is in the list
+        if (!branchList.includes('main')) {
+          branchList.unshift('main');
+        }
+        
+        setBranches(branchList);
+      }
+    } catch (error) {
+      console.error('Failed to fetch branches:', error);
+      // Fallback to main branch
+      setBranches(['main']);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch branches on mount
+  useEffect(() => {
+    if (vibekitClient && vibekitSessionId && repository) {
+      fetchBranches();
+    }
+  }, [vibekitClient, vibekitSessionId, repository]);
+
+  // Switch branch
+  const handleBranchSwitch = async (branch: string) => {
+    if (!vibekitClient || !vibekitSessionId || branch === selectedBranch) return;
+
+    setLoading(true);
+    try {
+      // Check for uncommitted changes
+      const statusResult = await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        'cd /var/vibe0 && git status --porcelain'
+      );
+
+      if (statusResult.stdout && statusResult.stdout.trim()) {
+        // There are uncommitted changes
+        const shouldStash = confirm(
+          'You have uncommitted changes. Do you want to stash them before switching branches?'
+        );
+
+        if (shouldStash) {
+          await vibekitClient.executeCommand(
+            tenantId,
+            vibekitSessionId,
+            'cd /var/vibe0 && git stash push -m "Auto-stash before branch switch"'
+          );
+        } else {
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Switch branch
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git checkout ${branch}`
+      );
+
+      // Pull latest changes
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git pull origin ${branch} || echo "No remote changes"`
+      );
+
+      setSelectedBranch(branch);
+      updateSession(sessionId, { currentBranch: branch });
+
+      toast({
+        title: 'Branch switched',
+        description: `Now on branch: ${branch}`,
+      });
+    } catch (error) {
+      console.error('Failed to switch branch:', error);
+      toast({
+        title: 'Failed to switch branch',
+        description: 'Could not switch to the selected branch',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Create new branch
+  const handleCreateBranch = async () => {
+    if (!vibekitClient || !vibekitSessionId || !newBranchName) return;
+
+    setCreating(true);
+    try {
+      // Create and checkout new branch
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git checkout -b ${newBranchName}`
+      );
+
+      // Push to remote
+      await vibekitClient.executeCommand(
+        tenantId,
+        vibekitSessionId,
+        `cd /var/vibe0 && git push -u origin ${newBranchName}`
+      );
+
+      // Update state
+      setBranches([...branches, newBranchName]);
+      setSelectedBranch(newBranchName);
+      updateSession(sessionId, { currentBranch: newBranchName });
+
+      toast({
+        title: 'Branch created',
+        description: `Created and switched to: ${newBranchName}`,
+      });
+
+      setShowCreateDialog(false);
+      setNewBranchName('');
+    } catch (error) {
+      console.error('Failed to create branch:', error);
+      toast({
+        title: 'Failed to create branch',
+        description: 'Could not create the new branch',
+        variant: 'destructive',
+      });
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (!repository) {
+    return null;
+  }
+
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <GitBranch className="h-4 w-4 text-muted-foreground" />
+        <Select
+          value={selectedBranch}
+          onValueChange={handleBranchSwitch}
+          disabled={loading || !vibekitClient}
+        >
+          <SelectTrigger className="h-8 w-[140px]">
+            {loading ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <SelectValue />
+            )}
+          </SelectTrigger>
+          <SelectContent>
+            {branches.map((branch) => (
+              <SelectItem key={branch} value={branch}>
+                <div className="flex items-center gap-2">
+                  {branch === selectedBranch && (
+                    <Check className="h-3 w-3 text-green-600" />
+                  )}
+                  <span>{branch}</span>
+                </div>
+              </SelectItem>
+            ))}
+            <div className="border-t mt-1 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full justify-start gap-2 h-8"
+                onClick={() => setShowCreateDialog(true)}
+              >
+                <Plus className="h-3 w-3" />
+                Create new branch
+              </Button>
+            </div>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Create Branch Dialog */}
+      <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create New Branch</DialogTitle>
+            <DialogDescription>
+              Create a new branch from the current branch ({selectedBranch})
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="branch-name">Branch name</Label>
+              <Input
+                id="branch-name"
+                value={newBranchName}
+                onChange={(e) => setNewBranchName(e.target.value)}
+                placeholder="feature/new-feature"
+              />
+              <p className="text-xs text-muted-foreground">
+                Use descriptive names like feature/auth or fix/bug-123
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowCreateDialog(false)}
+              disabled={creating}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateBranch}
+              disabled={!newBranchName || creating}
+            >
+              {creating ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                'Create Branch'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};
