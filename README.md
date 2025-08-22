@@ -15,4 +15,5 @@ Category Animation (Kareem)
 QR Code Generator (Ziad)
 
 QR Code Scanner (Kareem)
- 
+KALEED AL ASAD
+ceo @mckinsey
